@@ -14,11 +14,16 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import dagger.hilt.android.AndroidEntryPoint
+import hackville.app.SignMeFi.navigation.OnboardingNavigationHandler
+import hackville.app.SignMeFi.onboarding.OnboardingScreen
+import hackville.app.SignMeFi.splash.SplashScreen
 import hackville.app.SignMeFi.ui.theme.MyApplicationTheme
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     private var hasCameraPermission by mutableStateOf(false)
+    private var showSplash by mutableStateOf(true)
+    private var showOnboarding by mutableStateOf(false)
     
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -29,6 +34,18 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        
+        // Set up navigation handler for DI
+        val navigationHandler = object : OnboardingNavigationHandler {
+            override fun onGetStarted() {
+                showOnboarding = false
+            }
+            
+            override fun onSkip() {
+                showOnboarding = false
+            }
+        }
+        hackville.app.SignMeFi.di.NavigationModule.setNavigationHandler(navigationHandler)
         
         // Check camera permission
         hasCameraPermission = ContextCompat.checkSelfPermission(
@@ -46,13 +63,27 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    if (hasCameraPermission) {
-                        SignLanguageScreen()
-                    } else {
-                        androidx.compose.material3.Text(
-                            text = "Camera permission is required",
-                            modifier = Modifier.fillMaxSize()
-                        )
+                    when {
+                        showSplash -> {
+                            SplashScreen(
+                                onNavigateToOnboarding = {
+                                    showSplash = false
+                                    showOnboarding = true
+                                }
+                            )
+                        }
+                        showOnboarding -> {
+                            OnboardingScreen()
+                        }
+                        hasCameraPermission -> {
+                            SignLanguageScreen()
+                        }
+                        else -> {
+                            androidx.compose.material3.Text(
+                                text = "Camera permission is required",
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
                     }
                 }
             }

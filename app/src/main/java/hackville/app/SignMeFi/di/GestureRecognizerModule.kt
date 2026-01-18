@@ -34,16 +34,19 @@ annotation class MediaPipeRecognizer
 @InstallIn(SingletonComponent::class)
 object GestureRecognizerModule {
     
-    private const val GEMINI_API_KEY = "AIzaSyAL5tnE4UnKHGK0n_r547TnLwH4EjXF30k"
-    
     /**
      * Provides the Gemini gesture recognizer (qualified).
+     * API key is loaded from BuildConfig, which reads from local.properties
      */
     @Provides
     @Singleton
     @GeminiRecognizer
     fun provideGeminiGestureRecognizer(): GestureRecognizer {
-        return GeminiGestureRecognizer(apiKey = GEMINI_API_KEY)
+        val apiKey = hackville.app.SignMeFi.BuildConfig.GEMINI_API_KEY
+        if (apiKey.isBlank()) {
+            android.util.Log.w("GestureRecognizerModule", "GEMINI_API_KEY is empty. Please add it to local.properties")
+        }
+        return GeminiGestureRecognizer(apiKey = apiKey)
     }
     
     /**

@@ -16,13 +16,26 @@ import kotlinx.coroutines.sync.withLock
  */
 class HybridGestureRecognizer(
     private val mediaPipeRecognizer: MediaPipeGestureRecognizer,
-    private val geminiRecognizer: GeminiGestureRecognizer
+    private val geminiRecognizer: GeminiGestureRecognizer,
+    private var onHandDetectionChanged: ((Boolean) -> Unit)? = null,
+    private var onGeminiStatusChanged: ((String) -> Unit)? = null
 ) : GestureRecognizer {
     
     private var isHandPresent = false
     private var lastGeminiFrameTime = 0L
     private val geminiFrameIntervalMs = 500L // 2 FPS = 500ms between frames
     private val stateMutex = Mutex()
+    
+    /**
+     * Set callbacks for state changes (for debugging/monitoring)
+     */
+    fun setCallbacks(
+        onHandDetectionChanged: ((Boolean) -> Unit)? = null,
+        onGeminiStatusChanged: ((String) -> Unit)? = null
+    ) {
+        this.onHandDetectionChanged = onHandDetectionChanged
+        this.onGeminiStatusChanged = onGeminiStatusChanged
+    }
     
     override suspend fun recognizeGesture(bitmap: Bitmap): String? {
         return stateMutex.withLock {
@@ -34,13 +47,20 @@ class HybridGestureRecognizer(
             val handJustDisappeared = !handDetected && isHandPresent
             isHandPresent = handDetected
             
+            // Notify hand detection state change
+            if (handJustAppeared || handJustDisappeared) {
+                onHandDetectionChanged?.invoke(isHandPresent)
+            }
+            
             if (handJustAppeared) {
                 Log.d("HybridGestureRecognizer", "Hand detected - starting Gemini recognition")
                 lastGeminiFrameTime = 0L // Reset timer to send first frame immediately
+                onGeminiStatusChanged?.invoke("Hand detected, waiting for rate limit...")
             }
             
             if (handJustDisappeared) {
                 Log.d("HybridGestureRecognizer", "Hand left - stopping Gemini recognition")
+                onGeminiStatusChanged?.invoke("Hand left, idle")
                 return@withLock null
             }
             
@@ -52,22 +72,34 @@ class HybridGestureRecognizer(
                 if (timeSinceLastGeminiFrame >= geminiFrameIntervalMs) {
                     Log.d("HybridGestureRecognizer", "Sending frame to Gemini (2 FPS)")
                     lastGeminiFrameTime = currentTime
+                    onGeminiStatusChanged?.invoke("Calling Gemini API...")
                     
                     // Send to Gemini for actual recognition
                     return@withLock try {
-                        geminiRecognizer.recognizeGesture(bitmap)
+                        val result = geminiRecognizer.recognizeGesture(bitmap)
+                        if (result != null) {
+                            onGeminiStatusChanged?.invoke("Success: $result")
+                        } else {
+                            onGeminiStatusChanged?.invoke("No gesture detected")
+                        }
+                        result
                     } catch (e: Exception) {
                         Log.e("HybridGestureRecognizer", "Gemini recognition failed", e)
+                        onGeminiStatusChanged?.invoke("Error: ${e.message ?: e.javaClass.simpleName}")
                         null
                     }
                 } else {
                     // Too soon since last Gemini frame, skip this frame
-                    Log.d("HybridGestureRecognizer", "Skipping Gemini frame (rate limiting to 2 FPS)")
+                    val waitTime = geminiFrameIntervalMs - timeSinceLastGeminiFrame
+                    onGeminiStatusChanged?.invoke("Rate limiting (${waitTime}ms remaining)")
                     return@withLock null
                 }
             }
             
             // No hand detected, return null
+            if (!isHandPresent) {
+                onGeminiStatusChanged?.invoke("No hand detected")
+            }
             null
         }
     }
