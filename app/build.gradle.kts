@@ -7,10 +7,27 @@ plugins {
 }
 
 // Load local.properties to get API keys
-val localProperties = java.util.Properties()
-val localPropertiesFile = rootProject.file("local.properties")
-if (localPropertiesFile.exists()) {
-    localPropertiesFile.inputStream().use { localProperties.load(it) }
+fun getLocalProperty(key: String): String {
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.exists()) {
+        try {
+            localPropertiesFile.inputStream().use { stream ->
+                stream.bufferedReader(Charsets.UTF_8).useLines { lines ->
+                    lines.forEach { line ->
+                        if (line.startsWith("$key=") && !line.trimStart().startsWith("#")) {
+                            val value = line.substringAfter("=").trim()
+                            if (value.isNotEmpty()) {
+                                return value
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            println("Warning: Failed to read $key from local.properties: ${e.message}")
+        }
+    }
+    return ""
 }
 
 android {
@@ -27,8 +44,34 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         
         // Load API key from local.properties
-        val geminiApiKey = localProperties.getProperty("GEMINI_API_KEY") ?: ""
-        buildConfigField("String", "GEMINI_API_KEY", "\"$geminiApiKey\"")
+        val geminiApiKey = getLocalProperty("GEMINI_API_KEY")
+        // Ensure API key is not empty and not too large (Android BuildConfig has limits)
+        // Truncate if necessary and properly escape the string for BuildConfig
+        val maxKeyLength = 500 // Conservative limit to avoid BuildConfig issues
+        val trimmedKey = if (geminiApiKey.length > maxKeyLength) {
+            println("Warning: GEMINI_API_KEY truncated from ${geminiApiKey.length} to $maxKeyLength chars")
+            geminiApiKey.substring(0, maxKeyLength)
+        } else {
+            geminiApiKey
+        }
+        
+        val escapedApiKey = if (trimmedKey.isNotEmpty()) {
+            trimmedKey.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\$", "\\\$")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+        } else {
+            ""
+        }
+        
+        if (escapedApiKey.isNotEmpty()) {
+            // Use single quotes in Gradle to avoid issues with special characters
+            buildConfigField("String", "GEMINI_API_KEY", "\"$escapedApiKey\"")
+        } else {
+            buildConfigField("String", "GEMINI_API_KEY", "\"\"")
+            println("Warning: GEMINI_API_KEY is empty. Please add it to local.properties")
+        }
     }
 
     buildTypes {

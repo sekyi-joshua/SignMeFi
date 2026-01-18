@@ -40,9 +40,9 @@ class MediaPipeGestureRecognizer(
             val modelFileName = "gesture_recognizer.task"
             try {
                 context.assets.open(modelFileName).close()
-                Log.d("MediaPipeGestureRecognizer", "Model file found in assets: $modelFileName")
+                Log.d("SignMeFi_HandDetection", "Model file found in assets: $modelFileName")
             } catch (e: Exception) {
-                Log.e("MediaPipeGestureRecognizer", "Model file not found in assets: $modelFileName. Please ensure the file is in app/src/main/assets/", e)
+                Log.e("SignMeFi_HandDetection", "Model file not found in assets: $modelFileName. Please ensure the file is in app/src/main/assets/", e)
                 recognizer = null
                 return
             }
@@ -62,9 +62,9 @@ class MediaPipeGestureRecognizer(
                 .build()
             
             recognizer = GestureRecognizer.createFromOptions(context, options)
-            Log.d("MediaPipeGestureRecognizer", "Gesture recognizer initialized successfully from assets/$modelFileName")
+            Log.d("SignMeFi_HandDetection", "Gesture recognizer initialized successfully from assets/$modelFileName")
         } catch (e: Exception) {
-            Log.e("MediaPipeGestureRecognizer", "Failed to initialize recognizer. Make sure gesture_recognizer.task is in assets folder.", e)
+            Log.e("SignMeFi_HandDetection", "Failed to initialize recognizer. Make sure gesture_recognizer.task is in assets folder.", e)
             recognizer = null
         }
     }
@@ -87,19 +87,19 @@ class MediaPipeGestureRecognizer(
             val hasHand = landmarks.isNotEmpty()
             
             if (hasHand) {
-                Log.d("MediaPipeGestureRecognizer", "Hand detected (${landmarks.size} hand(s))")
+                Log.d("SignMeFi_HandDetection", "Hand detected (${landmarks.size} hand(s))")
             }
             
             hasHand
         } catch (e: Exception) {
-            Log.e("MediaPipeGestureRecognizer", "Error detecting hand", e)
+            Log.e("SignMeFi_HandDetection", "Error detecting hand", e)
             false
         }
     }
     
     override suspend fun recognizeGesture(bitmap: Bitmap): String? {
         val recognizer = this.recognizer ?: run {
-            Log.e("MediaPipeGestureRecognizer", "Recognizer not initialized. Please ensure gesture_recognizer.task model file is in assets folder.")
+            Log.e("SignMeFi_HandDetection", "Recognizer not initialized. Please ensure gesture_recognizer.task model file is in assets folder.")
             return null
         }
         
@@ -121,14 +121,14 @@ class MediaPipeGestureRecognizer(
                     // Get the top gesture (highest score)
                     val topGesture = handGestures.maxByOrNull { it.score() }
                     val categoryName = topGesture?.categoryName()
-                    Log.d("MediaPipeGestureRecognizer", "Recognized gesture: $categoryName")
+                    Log.d("SignMeFi_HandDetection", "Recognized gesture: $categoryName")
                     return categoryName
                 }
             }
             
             null
         } catch (e: Exception) {
-            Log.e("MediaPipeGestureRecognizer", "Error recognizing gesture", e)
+            Log.e("SignMeFi_HandDetection", "Error recognizing gesture", e)
             null
         }
     }

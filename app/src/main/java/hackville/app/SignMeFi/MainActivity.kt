@@ -14,8 +14,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import dagger.hilt.android.AndroidEntryPoint
+import hackville.app.SignMeFi.home.HomeScreen
 import hackville.app.SignMeFi.navigation.OnboardingNavigationHandler
-import hackville.app.SignMeFi.onboarding.OnboardingScreen
 import hackville.app.SignMeFi.splash.SplashScreen
 import hackville.app.SignMeFi.ui.theme.MyApplicationTheme
 
@@ -23,12 +23,18 @@ import hackville.app.SignMeFi.ui.theme.MyApplicationTheme
 class MainActivity : ComponentActivity() {
     private var hasCameraPermission by mutableStateOf(false)
     private var showSplash by mutableStateOf(true)
-    private var showOnboarding by mutableStateOf(false)
+    private var showHome by mutableStateOf(false)
+    private var showSignLanguageScreen by mutableStateOf(false)
     
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         hasCameraPermission = isGranted
+        if (isGranted && showHome) {
+            // If permission granted and we're on home screen, navigate to sign language screen
+            showHome = false
+            showSignLanguageScreen = true
+        }
     }
     
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -38,11 +44,11 @@ class MainActivity : ComponentActivity() {
         // Set up navigation handler for DI
         val navigationHandler = object : OnboardingNavigationHandler {
             override fun onGetStarted() {
-                showOnboarding = false
+                showHome = true
             }
             
             override fun onSkip() {
-                showOnboarding = false
+                showHome = true
             }
         }
         hackville.app.SignMeFi.di.NavigationModule.setNavigationHandler(navigationHandler)
@@ -68,15 +74,29 @@ class MainActivity : ComponentActivity() {
                             SplashScreen(
                                 onNavigateToOnboarding = {
                                     showSplash = false
-                                    showOnboarding = true
+                                    showHome = true
                                 }
                             )
                         }
-                        showOnboarding -> {
-                            OnboardingScreen()
+                        showSignLanguageScreen && hasCameraPermission -> {
+                            SignLanguageScreen(
+                                onBackClick = {
+                                    showSignLanguageScreen = false
+                                    showHome = true
+                                }
+                            )
                         }
-                        hasCameraPermission -> {
-                            SignLanguageScreen()
+                        showHome -> {
+                            HomeScreen(
+                                onNavigateToSignLanguage = {
+                                    if (hasCameraPermission) {
+                                        showHome = false
+                                        showSignLanguageScreen = true
+                                    } else {
+                                        requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+                                    }
+                                }
+                            )
                         }
                         else -> {
                             androidx.compose.material3.Text(

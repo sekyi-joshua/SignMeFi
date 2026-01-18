@@ -11,13 +11,21 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -31,22 +39,44 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import hackville.app.SignMeFi.camera.components.CameraPreview
+import hackville.app.SignMeFi.di.GeminiRecognizer
+import hackville.app.SignMeFi.di.MediaPipeRecognizer
 import hackville.app.SignMeFi.gesture.GestureRecognizer
 import hackville.app.SignMeFi.gesture.HybridGestureRecognizer
+import hackville.app.SignMeFi.gesture.MediaPipeGestureRecognizer
+import hackville.app.SignMeFi.gesture.GeminiGestureRecognizer
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import java.util.concurrent.Executors
 
 @HiltViewModel
 class SignLanguageViewModel @Inject constructor(
-    private val gestureRecognizer: GestureRecognizer
+    @MediaPipeRecognizer private val mediaPipeRecognizer: GestureRecognizer,
+    @GeminiRecognizer private val geminiRecognizer: GestureRecognizer
 ) : androidx.lifecycle.ViewModel() {
     
-    private val _detectedText = MutableStateFlow<String?>(null)
-    val detectedText: StateFlow<String?> = _detectedText.asStateFlow()
+    // Store results with timestamps for expiration
+    private data class ResultWithTimestamp(val result: String, val timestamp: Long)
+    
+    // Current active recognizer
+    private var currentRecognizer: GestureRecognizer
+    
+    // Mode state: true = Hybrid (MediaPipe + Gemini), false = MediaPipe only
+    private val _isHybridMode = MutableStateFlow(true)
+    val isHybridMode: StateFlow<Boolean> = _isHybridMode.asStateFlow()
+    
+    private val _detectedResults = MutableStateFlow<List<ResultWithTimestamp>>(emptyList())
+    val detectedResults: StateFlow<List<String>> = _detectedResults.map { results ->
+        results.map { it.result }
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
     
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -61,17 +91,92 @@ class SignLanguageViewModel @Inject constructor(
     private val _geminiStatus = MutableStateFlow<String>("Idle")
     val geminiStatus: StateFlow<String> = _geminiStatus.asStateFlow()
     
+    private val _pendingRequestCount = MutableStateFlow(0)
+    val pendingRequestCount: StateFlow<Int> = _pendingRequestCount.asStateFlow()
+    
     init {
-        // Set up callbacks if using HybridGestureRecognizer
-        if (gestureRecognizer is HybridGestureRecognizer) {
-            gestureRecognizer.setCallbacks(
+        // Initialize with Hybrid mode (MediaPipe + Gemini)
+        val mediaPipe = mediaPipeRecognizer as MediaPipeGestureRecognizer
+        val gemini = geminiRecognizer as GeminiGestureRecognizer
+        currentRecognizer = HybridGestureRecognizer(mediaPipe, gemini)
+        setupCallbacks()
+        
+        // Start coroutine to remove expired results (older than 3 seconds)
+        viewModelScope.launch {
+            while (true) {
+                delay(100) // Check every 100ms
+                val now = System.currentTimeMillis()
+                val threeSecondsAgo = now - 3000L
+                _detectedResults.value = _detectedResults.value.filter { it.timestamp > threeSecondsAgo }
+            }
+        }
+    }
+    
+    private fun setupCallbacks() {
+        // Release previous recognizer if it was Hybrid
+        if (currentRecognizer is HybridGestureRecognizer) {
+            (currentRecognizer as HybridGestureRecognizer).setCallbacks(
                 onHandDetectionChanged = { detected ->
                     _handDetected.value = detected
                 },
                 onGeminiStatusChanged = { status ->
                     _geminiStatus.value = status
+                },
+                onResultReceived = { result ->
+                    val now = System.currentTimeMillis()
+                    _detectedResults.value = _detectedResults.value + ResultWithTimestamp(result, now)
+                },
+                onResultsCleared = {
+                    // Don't clear - results expire automatically after 3 seconds
+                },
+                onPendingCountChanged = { count ->
+                    _pendingRequestCount.value = count
                 }
             )
+        } else {
+            // MediaPipe only mode - reset status indicators
+            _geminiStatus.value = "Not used (MediaPipe only)"
+            _pendingRequestCount.value = 0
+        }
+    }
+    
+    fun toggleRecognizerMode() {
+        viewModelScope.launch {
+            // Note: We don't release the Hybrid recognizer when switching away from it
+            // because release() would also release the underlying MediaPipe and Gemini recognizers
+            // (which are singletons we need to reuse). Instead, we just stop using it.
+            // The old Hybrid instance will be garbage collected, and its coroutines will
+            // eventually complete or be cancelled when the instance is GC'd.
+            
+            // Clear current results
+            _detectedResults.value = emptyList()
+            _handDetected.value = false
+            _errorMessage.value = null
+            
+            // Switch mode
+            val newMode = !_isHybridMode.value
+            _isHybridMode.value = newMode
+            
+            if (newMode) {
+                // Switch to Hybrid mode (MediaPipe + Gemini)
+                // Always create a new Hybrid instance to ensure clean state
+                val mediaPipe = mediaPipeRecognizer as MediaPipeGestureRecognizer
+                val gemini = geminiRecognizer as GeminiGestureRecognizer
+                currentRecognizer = HybridGestureRecognizer(mediaPipe, gemini)
+                android.util.Log.d("SignLanguageViewModel", "Switched to Hybrid mode (MediaPipe + Gemini)")
+            } else {
+                // Switch to MediaPipe only mode
+                // Use the singleton instance directly
+                // Note: The MediaPipe recognizer should still be usable even if Hybrid released it,
+                // because MediaPipeGestureRecognizer's release() just closes the internal recognizer
+                // and we can't easily reinitialize it. For now, we'll assume it's still usable.
+                // If issues occur, we may need to modify HybridGestureRecognizer to not release
+                // underlying recognizers, or add a reinitialize method to MediaPipeGestureRecognizer.
+                currentRecognizer = mediaPipeRecognizer
+                android.util.Log.d("SignLanguageViewModel", "Switched to MediaPipe only mode")
+            }
+            
+            setupCallbacks()
         }
     }
     
@@ -81,11 +186,27 @@ class SignLanguageViewModel @Inject constructor(
             _errorMessage.value = null
             
             try {
-                val result = gestureRecognizer.recognizeGesture(bitmap)
-                if (result != null) {
-                    _detectedText.value = result
-                    _errorMessage.value = null // Clear any previous errors on success
+                if (currentRecognizer is HybridGestureRecognizer) {
+                    // With streaming architecture, results come through callbacks
+                    // This just triggers the recognition process
+                    currentRecognizer.recognizeGesture(bitmap)
+                } else {
+                    // MediaPipe only mode - process result directly
+                    val result = currentRecognizer.recognizeGesture(bitmap)
+                    if (result != null) {
+                        val now = System.currentTimeMillis()
+                        _detectedResults.value = _detectedResults.value + ResultWithTimestamp(result, now)
+                        
+                        // Update hand detection status
+                        val mediaPipe = currentRecognizer as MediaPipeGestureRecognizer
+                        _handDetected.value = mediaPipe.hasHand(bitmap)
+                    } else {
+                        // No gesture detected, but check if hand is present
+                        val mediaPipe = currentRecognizer as MediaPipeGestureRecognizer
+                        _handDetected.value = mediaPipe.hasHand(bitmap)
+                    }
                 }
+                _errorMessage.value = null // Clear any previous errors on success
             } catch (e: Exception) {
                 // Log full exception details for debugging
                 android.util.Log.e("SignLanguageViewModel", "Error recognizing gesture", e)
@@ -118,44 +239,70 @@ class SignLanguageViewModel @Inject constructor(
     
     override fun onCleared() {
         super.onCleared()
-        gestureRecognizer.release()
+        currentRecognizer.release()
     }
 }
 
 @Composable
 fun SignLanguageScreen(
+    onBackClick: () -> Unit = {},
     viewModel: SignLanguageViewModel = hiltViewModel()
 ) {
-    val detectedText by viewModel.detectedText.collectAsState()
+    val detectedResults by viewModel.detectedResults.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
     val handDetected by viewModel.handDetected.collectAsState()
     val geminiStatus by viewModel.geminiStatus.collectAsState()
+    val pendingRequestCount by viewModel.pendingRequestCount.collectAsState()
+    val isHybridMode by viewModel.isHybridMode.collectAsState()
     
     var isUsingBackCamera by remember { mutableStateOf(false) }
     var switchCameraTrigger by remember { mutableStateOf(0) }
     
     Box(modifier = Modifier.fillMaxSize()) {
-        // Camera View
-        CameraView(
+        // Camera Preview
+        CameraPreview(
             onFrameCaptured = { bitmap ->
                 viewModel.recognizeGesture(bitmap)
             },
             onCameraStateChanged = { usingBack ->
                 isUsingBackCamera = usingBack
             },
-            switchCameraTrigger = switchCameraTrigger
+            switchCameraTrigger = switchCameraTrigger,
+            modifier = Modifier.fillMaxSize()
         )
         
-        // Large detected text display at top center
-        detectedText?.let { text ->
+        // Back button at top left
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(16.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                    .clickable(onClick = onBackClick),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ArrowBack,
+                    contentDescription = "Back",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+        }
+        
+        // Large detected results display at top center (all results separated by spaces)
+        if (detectedResults.isNotEmpty()) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .padding(top = 48.dp)
             ) {
                 Text(
-                    text = text,
+                    text = detectedResults.joinToString(" "),
                     color = Color.White,
                     style = MaterialTheme.typography.displayLarge,
                     modifier = Modifier
@@ -184,12 +331,22 @@ fun SignLanguageScreen(
                 )
             }
             
-            // Loading indicator
-            if (isLoading) {
-                CircularProgressIndicator(
-                    modifier = Modifier.padding(8.dp),
-                    color = Color.White
-                )
+            // Loading indicator - show when there are pending requests
+            if (pendingRequestCount > 0) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(8.dp)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.padding(bottom = 4.dp),
+                        color = Color.White
+                    )
+                    Text(
+                        text = "$pendingRequestCount pending",
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             }
             
             // Debug information
@@ -224,11 +381,36 @@ fun SignLanguageScreen(
                 )
             }
             
-            // Camera info and switch button
+            // Recognizer mode toggle and camera controls
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.padding(vertical = 8.dp)
             ) {
+                // Recognizer mode indicator and toggle button
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                ) {
+                    Text(
+                        text = "Mode: ${if (isHybridMode) "Hybrid (MP+Gemini)" else "MediaPipe Only"}",
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier
+                            .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                    
+                    Button(
+                        onClick = {
+                            viewModel.toggleRecognizerMode()
+                        },
+                        modifier = Modifier.padding(0.dp)
+                    ) {
+                        Text(if (isHybridMode) "MP Only" else "Hybrid")
+                    }
+                }
+                
                 // Current camera indicator
                 Text(
                     text = "Camera: ${if (isUsingBackCamera) "Back" else "Front"}",
@@ -250,8 +432,8 @@ fun SignLanguageScreen(
                 }
             }
             
-            // Status text (only show if no detected text)
-            if (detectedText == null) {
+            // Status text (only show if no detected results)
+            if (detectedResults.isEmpty()) {
                 Text(
                     text = "Sign clearly at camera...",
                     color = Color.White,
@@ -438,21 +620,21 @@ fun CameraView(
                                 // If we get 15 consecutive empty frames (about 1 second at 30fps), switch to back camera
                                 if (emptyFrameCount >= 15) {
                                     android.util.Log.w("CameraView", "Front camera showing no images, switching to back camera")
-                                    try {
-                                        val backCameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-                                        currentCameraSelector = backCameraSelector
-                                        if (bindCamera(backCameraSelector)) {
-                                            currentIsUsingBackCamera = true
-                                            hasSwitchedCamera = true
-                                            emptyFrameCount = 0
-                                            // Update state on main thread
-                                            mainHandler.post {
+                                    // Switch camera on main thread (CameraX requires main thread)
+                                    mainHandler.post {
+                                        try {
+                                            val backCameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                                            currentCameraSelector = backCameraSelector
+                                            if (bindCamera(backCameraSelector)) {
+                                                currentIsUsingBackCamera = true
+                                                hasSwitchedCamera = true
+                                                emptyFrameCount = 0
                                                 isUsingBackCamera = true
+                                                android.util.Log.d("CameraView", "Successfully switched to back camera")
                                             }
-                                            android.util.Log.d("CameraView", "Successfully switched to back camera")
+                                        } catch (e: Exception) {
+                                            android.util.Log.e("CameraView", "Failed to switch to back camera", e)
                                         }
-                                    } catch (e: Exception) {
-                                        android.util.Log.e("CameraView", "Failed to switch to back camera", e)
                                     }
                                 }
                             } else {

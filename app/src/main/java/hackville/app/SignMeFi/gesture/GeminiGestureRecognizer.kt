@@ -13,7 +13,7 @@ import kotlinx.coroutines.sync.withLock
  */
 class GeminiGestureRecognizer(
     private val apiKey: String,
-    private val modelName: String = "gemini-2.5-flash"
+    private val modelName: String = "gemini-2.5-flash" // Using Flash model for speed
 ) : GestureRecognizer {
     
     private val model: GenerativeModel? by lazy {
@@ -24,7 +24,7 @@ class GeminiGestureRecognizer(
                     apiKey = apiKey
                 )
             } catch (e: Exception) {
-                Log.e("GeminiGestureRecognizer", "Failed to create model", e)
+                Log.e("SignMeFi_Gemini", "Failed to create model", e)
                 null
             }
         } else {
@@ -32,76 +32,84 @@ class GeminiGestureRecognizer(
         }
     }
     
-    private val signLanguagePrompt = """
-        Look at this image of a person's hands. Identify what sign language letter, word, or symbol they are signing.
-        Respond with ONLY the letter, word, or symbol name in plain text. 
-        If you cannot clearly identify a sign, respond with "UNKNOWN".
-        Do not include any explanations or additional text.
-    """.trimIndent()
+    // Minimal prompt for faster processing
+    private val signLanguagePrompt = "What sign language letter/word is shown? Respond with ONLY the letter/word, or 'UNKNOWN'."
     
     private val requestMutex = Mutex() // Ensures only one request at a time
-    private var lastProcessedTime = 0L
-    private val rateLimitIntervalMs = 10_000L // 10 seconds between API calls
     
     override suspend fun recognizeGesture(bitmap: Bitmap): String? {
         val currentModel = model ?: run {
             val errorMsg = "Model not initialized. Check API key. API key is ${if (apiKey.isBlank()) "blank" else "set (length: ${apiKey.length})"}"
-            Log.e("GeminiGestureRecognizer", errorMsg)
+            Log.e("SignMeFi_Gemini", errorMsg)
             throw IllegalStateException(errorMsg)
         }
         
-        // Ensure only one request at a time and wait for rate limit
+        // Ensure only one request at a time
         return requestMutex.withLock {
-            val currentTime = System.currentTimeMillis()
-            val timeSinceLastRequest = currentTime - lastProcessedTime
-            
-            // Wait if we're within the rate limit window
-            if (timeSinceLastRequest < rateLimitIntervalMs) {
-                val waitTime = rateLimitIntervalMs - timeSinceLastRequest
-                Log.d("GeminiGestureRecognizer", "Rate limited. Waiting ${waitTime}ms before next request")
-                delay(waitTime)
-            }
-            
-            // Now execute the request
             val requestStartTime = System.currentTimeMillis()
+            val totalRequestStartTimestamp = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault()).format(java.util.Date(requestStartTime))
+            Log.d("SignMeFi_Gemini", "┌─ TOTAL REQUEST STARTED at $totalRequestStartTimestamp")
             
             try {
                 val result = executeRequest(currentModel, bitmap)
-                lastProcessedTime = System.currentTimeMillis()
-                Log.d("GeminiGestureRecognizer", "Request completed successfully in ${System.currentTimeMillis() - requestStartTime}ms")
+                val totalRequestEndTime = System.currentTimeMillis()
+                val totalRequestDuration = totalRequestEndTime - requestStartTime
+                val totalRequestDurationSec = totalRequestDuration / 1000.0
+                val totalRequestEndTimestamp = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault()).format(java.util.Date(totalRequestEndTime))
+                Log.d("SignMeFi_Gemini", "└─ TOTAL REQUEST COMPLETED at $totalRequestEndTimestamp")
+                Log.d("SignMeFi_Gemini", "   TOTAL REQUEST DURATION: ${String.format("%.2f", totalRequestDurationSec)}s (${totalRequestDuration}ms)")
                 result
             } catch (e: Exception) {
-                // Request failed - update last processed time and wait for rate limit before allowing retry
-                lastProcessedTime = System.currentTimeMillis()
-                Log.e("GeminiGestureRecognizer", "Request failed. Will wait ${rateLimitIntervalMs}ms before allowing next attempt.", e)
-                
-                // Re-throw the exception after updating the timestamp
-                // The next request will wait for the rate limit interval
+                val totalRequestEndTime = System.currentTimeMillis()
+                val totalRequestDuration = totalRequestEndTime - requestStartTime
+                val totalRequestDurationSec = totalRequestDuration / 1000.0
+                val totalRequestEndTimestamp = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault()).format(java.util.Date(totalRequestEndTime))
+                Log.e("SignMeFi_Gemini", "└─ TOTAL REQUEST FAILED at $totalRequestEndTimestamp")
+                Log.e("SignMeFi_Gemini", "   TOTAL REQUEST DURATION: ${String.format("%.2f", totalRequestDurationSec)}s (${totalRequestDuration}ms)")
                 throw e
             }
         }
     }
     
     /**
-     * Executes the actual API request to Gemini.
+     * Executes the actual API request to Gemini with retry on rate limit.
      */
     private suspend fun executeRequest(currentModel: GenerativeModel, bitmap: Bitmap): String? {
+        return executeRequestWithRetry(currentModel, bitmap, maxRetries = 3)
+    }
+    
+    /**
+     * Executes the actual API request to Gemini with retry logic for rate limits.
+     */
+    private suspend fun executeRequestWithRetry(
+        currentModel: GenerativeModel, 
+        bitmap: Bitmap, 
+        maxRetries: Int = 3,
+        attempt: Int = 1
+    ): String? {
         return try {
-            // Resize bitmap if too large (Gemini has size limits)
-            val resizedBitmap = if (bitmap.width > 1024 || bitmap.height > 1024) {
-                val scale = minOf(1024f / bitmap.width, 1024f / bitmap.height)
-                val newWidth = (bitmap.width * scale).toInt()
-                val newHeight = (bitmap.height * scale).toInt()
-                Log.d("GeminiGestureRecognizer", "Resizing bitmap from ${bitmap.width}x${bitmap.height} to ${newWidth}x${newHeight}")
+            // Downscale to 640x480 for faster processing (maintains aspect ratio)
+            val targetWidth = 640
+            val targetHeight = 480
+            val scale = minOf(targetWidth.toFloat() / bitmap.width, targetHeight.toFloat() / bitmap.height)
+            val newWidth = (bitmap.width * scale).toInt().coerceAtLeast(1)
+            val newHeight = (bitmap.height * scale).toInt().coerceAtLeast(1)
+            
+            val resizedBitmap = if (bitmap.width != newWidth || bitmap.height != newHeight) {
+                Log.d("SignMeFi_Gemini", "Downscaling bitmap from ${bitmap.width}x${bitmap.height} to ${newWidth}x${newHeight} for faster processing")
                 Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
             } else {
                 bitmap
             }
             
-            Log.d("GeminiGestureRecognizer", "Sending request to Gemini API (model: $modelName, image size: ${resizedBitmap.width}x${resizedBitmap.height})...")
-            Log.d("GeminiGestureRecognizer", "API endpoint: generativelanguage.googleapis.com (via Google AI SDK)")
+            Log.d("SignMeFi_Gemini", "Sending request to Gemini API (model: $modelName, image size: ${resizedBitmap.width}x${resizedBitmap.height})...")
+            Log.d("SignMeFi_Gemini", "API endpoint: generativelanguage.googleapis.com (via Google AI SDK)")
             
             // Generate content with image and prompt
+            val apiCallStartTime = System.currentTimeMillis()
+            val apiCallStartTimestamp = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault()).format(java.util.Date(apiCallStartTime))
+            Log.d("SignMeFi_Gemini", ">>> API CALL STARTED at $apiCallStartTimestamp")
+            
             val response = currentModel.generateContent(
                 content {
                     text(signLanguagePrompt)
@@ -109,17 +117,23 @@ class GeminiGestureRecognizer(
                 }
             )
             
-            Log.d("GeminiGestureRecognizer", "Received response from Gemini")
+            val apiCallEndTime = System.currentTimeMillis()
+            val apiCallDuration = apiCallEndTime - apiCallStartTime
+            val apiCallDurationSec = apiCallDuration / 1000.0
+            val apiCallEndTimestamp = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault()).format(java.util.Date(apiCallEndTime))
+            Log.d("SignMeFi_Gemini", "<<< API CALL COMPLETED at $apiCallEndTimestamp")
+            Log.d("SignMeFi_Gemini", "    API CALL DURATION: ${String.format("%.2f", apiCallDurationSec)}s (${apiCallDuration}ms)")
+            Log.d("SignMeFi_Gemini", "Received response from Gemini")
             
             // Extract text from response
             val responseText = response.text?.trim()
             
-            Log.d("GeminiGestureRecognizer", "Response text: $responseText")
+            Log.d("SignMeFi_Gemini", "Response text: $responseText")
             
             if (!responseText.isNullOrBlank() && responseText != "UNKNOWN") {
                 responseText
             } else {
-                Log.d("GeminiGestureRecognizer", "No valid gesture detected (response was blank or UNKNOWN)")
+                Log.d("SignMeFi_Gemini", "No valid gesture detected (response was blank or UNKNOWN)")
                 null
             }
         } catch (e: java.net.UnknownHostException) {
@@ -132,17 +146,17 @@ class GeminiGestureRecognizer(
                     "3. Emulator network - If using emulator, ensure it has internet access\n" +
                     "4. Firewall/VPN blocking - Check if firewall/VPN is blocking Google APIs\n\n" +
                     "Technical details: ${e.message}"
-            Log.e("GeminiGestureRecognizer", errorMsg, e)
-            Log.e("GeminiGestureRecognizer", "Full exception: ${e.javaClass.name}", e)
+            Log.e("SignMeFi_Gemini", errorMsg, e)
+            Log.e("SignMeFi_Gemini", "Full exception: ${e.javaClass.name}", e)
             e.printStackTrace()
             throw RuntimeException(errorMsg, e)
         } catch (e: java.net.SocketTimeoutException) {
             val errorMsg = "Request timed out. The API took too long to respond. Details: ${e.message}"
-            Log.e("GeminiGestureRecognizer", errorMsg, e)
+            Log.e("SignMeFi_Gemini", errorMsg, e)
             throw RuntimeException(errorMsg, e)
         } catch (e: java.io.IOException) {
             val errorMsg = "Network error: ${e.message}. Check your internet connection."
-            Log.e("GeminiGestureRecognizer", errorMsg, e)
+            Log.e("SignMeFi_Gemini", errorMsg, e)
             e.printStackTrace()
             throw RuntimeException(errorMsg, e)
         } catch (e: Exception) {
@@ -162,8 +176,8 @@ class GeminiGestureRecognizer(
                         "   - Check that DNS is set (usually 8.8.8.8 or your router's DNS)\n" +
                         "4. Firewall/VPN blocking - Check if firewall/VPN is blocking Google APIs\n\n" +
                         "Technical details: ${unknownHostCause.message}"
-                Log.e("GeminiGestureRecognizer", errorMsg, e)
-                Log.e("GeminiGestureRecognizer", "Wrapped exception type: ${e.javaClass.simpleName}")
+                Log.e("SignMeFi_Gemini", errorMsg, e)
+                Log.e("SignMeFi_Gemini", "Wrapped exception type: ${e.javaClass.simpleName}")
                 e.printStackTrace()
                 throw RuntimeException(errorMsg, e)
             }
@@ -174,10 +188,10 @@ class GeminiGestureRecognizer(
             val cause = e.cause?.message ?: ""
             val stackTrace = e.stackTrace.take(5).joinToString("\n") { it.toString() }
             
-            Log.e("GeminiGestureRecognizer", "Exception type: $exceptionType")
-            Log.e("GeminiGestureRecognizer", "Exception message: $exceptionMessage")
-            Log.e("GeminiGestureRecognizer", "Cause: $cause")
-            Log.e("GeminiGestureRecognizer", "Stack trace (first 5 lines):\n$stackTrace")
+            Log.e("SignMeFi_Gemini", "Exception type: $exceptionType")
+            Log.e("SignMeFi_Gemini", "Exception message: $exceptionMessage")
+            Log.e("SignMeFi_Gemini", "Cause: $cause")
+            Log.e("SignMeFi_Gemini", "Stack trace (first 5 lines):\n$stackTrace")
             e.printStackTrace()
             
             // Check if cause message contains host resolution errors
@@ -205,15 +219,58 @@ class GeminiGestureRecognizer(
                 exceptionMessage.contains("429", ignoreCase = true) ||
                 exceptionMessage.contains("quota", ignoreCase = true) ||
                 exceptionMessage.contains("rate limit", ignoreCase = true) -> 
-                    "API quota/rate limit exceeded (429). Please try again later. Details: $exceptionMessage"
+                    "API quota/rate limit exceeded (429). Details: $exceptionMessage"
                 exceptionMessage.contains("500", ignoreCase = true) ||
                 exceptionMessage.contains("internal server", ignoreCase = true) -> 
                     "Server error (500). Gemini API is having issues. Try again later. Details: $exceptionMessage"
                 else -> "Error ($exceptionType): $exceptionMessage${if (cause.isNotBlank()) " (Cause: $cause)" else ""}"
             }
             
+            // If it's a rate limit error and we haven't exceeded max retries, handle retry
+            val isRateLimit = exceptionMessage.contains("429", ignoreCase = true) ||
+                    exceptionMessage.contains("quota", ignoreCase = true) ||
+                    exceptionMessage.contains("rate limit", ignoreCase = true)
+            
+            if (isRateLimit && attempt <= maxRetries) {
+                // Try to extract retry-after time from error message, default to 10 seconds
+                val retryAfterMs = extractRetryAfterMs(exceptionMessage, cause) ?: 10_000L
+                Log.w("SignMeFi_Gemini", "Rate limit hit (attempt $attempt/$maxRetries). Waiting ${retryAfterMs}ms before retry...")
+                delay(retryAfterMs)
+                // Retry with the same bitmap
+                return executeRequestWithRetry(currentModel, bitmap, maxRetries, attempt + 1)
+            }
+            
             throw Exception(userMsg, e)
         }
+    }
+    
+    /**
+     * Extracts retry-after time in milliseconds from error message.
+     * Looks for patterns like "retry after 5s", "retry-after: 10", etc.
+     */
+    private fun extractRetryAfterMs(message: String, cause: String): Long? {
+        val combined = "$message $cause"
+        
+        // Look for "retry after X seconds" or "retry-after: X"
+        val patterns = listOf(
+            Regex("retry[\\s-]after[\\s:]+(\\d+)\\s*seconds?", RegexOption.IGNORE_CASE),
+            Regex("retry[\\s-]after[\\s:]+(\\d+)\\s*s", RegexOption.IGNORE_CASE),
+            Regex("retry[\\s-]after[\\s:]+(\\d+)", RegexOption.IGNORE_CASE),
+            Regex("wait[\\s:]+(\\d+)\\s*seconds?", RegexOption.IGNORE_CASE),
+            Regex("wait[\\s:]+(\\d+)\\s*s", RegexOption.IGNORE_CASE)
+        )
+        
+        for (pattern in patterns) {
+            val match = pattern.find(combined)
+            if (match != null) {
+                val seconds = match.groupValues[1].toIntOrNull()
+                if (seconds != null && seconds > 0) {
+                    return (seconds * 1000L).coerceAtMost(60_000L) // Cap at 60 seconds
+                }
+            }
+        }
+        
+        return null
     }
     
     /**
