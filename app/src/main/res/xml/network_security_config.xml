@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Allow all HTTPS connections to Google APIs -->
+    <base-config cleartextTraffic="false">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+    
+    <!-- Specifically allow Google Generative AI API -->
+    <domain-config cleartextTraffic="false">
+        <domain includeSubdomains="true">generativelanguage.googleapis.com</domain>
+        <domain includeSubdomains="true">ai.google.dev</domain>
+        <domain includeSubdomains="true">googleapis.com</domain>
+    </domain-config>
+    
+    <!-- Allow Eleven Labs TTS API -->
+    <domain-config cleartextTraffic="false">
+        <domain includeSubdomains="true">api.elevenlabs.io</domain>
+    </domain-config>
+</network-security-config>
