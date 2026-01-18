@@ -46,6 +46,8 @@ import hackville.app.SignMeFi.gesture.GestureRecognizer
 import hackville.app.SignMeFi.gesture.HybridGestureRecognizer
 import hackville.app.SignMeFi.gesture.MediaPipeGestureRecognizer
 import hackville.app.SignMeFi.gesture.GeminiGestureRecognizer
+import hackville.app.SignMeFi.tts.ElevenLabsTTS
+import hackville.app.SignMeFi.audio.AudioPlayer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -60,7 +62,9 @@ import java.util.concurrent.Executors
 @HiltViewModel
 class SignLanguageViewModel @Inject constructor(
     @MediaPipeRecognizer private val mediaPipeRecognizer: GestureRecognizer,
-    @GeminiRecognizer private val geminiRecognizer: GestureRecognizer
+    @GeminiRecognizer private val geminiRecognizer: GestureRecognizer,
+    private val elevenLabsTTS: ElevenLabsTTS,
+    private val audioPlayer: AudioPlayer
 ) : androidx.lifecycle.ViewModel() {
     
     // Store results with timestamps for expiration
@@ -94,6 +98,14 @@ class SignLanguageViewModel @Inject constructor(
     private val _pendingRequestCount = MutableStateFlow(0)
     val pendingRequestCount: StateFlow<Int> = _pendingRequestCount.asStateFlow()
     
+    // TTS mode: true = single request (blocks until finished), false = concurrent (current behavior)
+    private val _isSingleRequestTTSMode = MutableStateFlow(false)
+    val isSingleRequestTTSMode: StateFlow<Boolean> = _isSingleRequestTTSMode.asStateFlow()
+    
+    // Track if TTS request is in progress
+    private val _isTTSInProgress = MutableStateFlow(false)
+    val isTTSInProgress: StateFlow<Boolean> = _isTTSInProgress.asStateFlow()
+    
     init {
         // Initialize with Hybrid mode (MediaPipe + Gemini)
         val mediaPipe = mediaPipeRecognizer as MediaPipeGestureRecognizer
@@ -125,6 +137,61 @@ class SignLanguageViewModel @Inject constructor(
                 onResultReceived = { result ->
                     val now = System.currentTimeMillis()
                     _detectedResults.value = _detectedResults.value + ResultWithTimestamp(result, now)
+                    
+                    android.util.Log.d("TTS", "SignLanguageViewModel: Received result from Gemini: '$result'")
+                    
+                    // Check if we should process TTS based on mode
+                    val isSingleRequestMode = _isSingleRequestTTSMode.value
+                    val ttsInProgress = _isTTSInProgress.value
+                    
+                    if (isSingleRequestMode && ttsInProgress) {
+                        android.util.Log.d("TTS", "SignLanguageViewModel: TTS in progress, skipping new request (single-request mode)")
+                        return@setCallbacks
+                    }
+                    
+                    // Convert text to speech and play audio
+                    viewModelScope.launch {
+                        try {
+                            _isTTSInProgress.value = true
+                            
+                            // In single-request mode, pause Gemini requests (cancels pending ones)
+                            if (isSingleRequestMode && currentRecognizer is HybridGestureRecognizer) {
+                                val hybridRecognizer = currentRecognizer as HybridGestureRecognizer
+                                android.util.Log.d("TTS", "SignLanguageViewModel: Pausing Gemini requests (cancelling pending)")
+                                hybridRecognizer.pause()
+                            }
+                            
+                            android.util.Log.d("TTS", "SignLanguageViewModel: Starting TTS conversion for: '$result' (mode: ${if (isSingleRequestMode) "single-request" else "concurrent"})")
+                            
+                            val audioPath = elevenLabsTTS.textToSpeech(result)
+                            
+                            if (audioPath != null) {
+                                android.util.Log.d("TTS", "SignLanguageViewModel: TTS conversion successful, playing audio: $audioPath")
+                                audioPlayer.playFile(audioPath)
+                                
+                                // Wait for audio to finish playing in single-request mode
+                                if (isSingleRequestMode) {
+                                    android.util.Log.d("TTS", "SignLanguageViewModel: Waiting for audio playback to finish...")
+                                    audioPlayer.waitForPlaybackToFinish()
+                                    android.util.Log.d("TTS", "SignLanguageViewModel: Audio playback finished")
+                                }
+                            } else {
+                                android.util.Log.w("TTS", "SignLanguageViewModel: Failed to generate TTS audio for: '$result'")
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("TTS", "SignLanguageViewModel: Error generating or playing TTS for: '$result'", e)
+                        } finally {
+                            // Resume Gemini requests in single-request mode (will check for hand detection again)
+                            if (isSingleRequestMode && currentRecognizer is HybridGestureRecognizer) {
+                                val hybridRecognizer = currentRecognizer as HybridGestureRecognizer
+                                android.util.Log.d("TTS", "SignLanguageViewModel: Resuming Gemini requests - will check for hand detection again")
+                                hybridRecognizer.resume()
+                            }
+                            
+                            _isTTSInProgress.value = false
+                            android.util.Log.d("TTS", "SignLanguageViewModel: TTS request completed")
+                        }
+                    }
                 },
                 onResultsCleared = {
                     // Don't clear - results expire automatically after 3 seconds
@@ -138,6 +205,11 @@ class SignLanguageViewModel @Inject constructor(
             _geminiStatus.value = "Not used (MediaPipe only)"
             _pendingRequestCount.value = 0
         }
+    }
+    
+    fun toggleTTSMode() {
+        _isSingleRequestTTSMode.value = !_isSingleRequestTTSMode.value
+        android.util.Log.d("TTS", "SignLanguageViewModel: TTS mode toggled to: ${if (_isSingleRequestTTSMode.value) "single-request" else "concurrent"}")
     }
     
     fun toggleRecognizerMode() {
@@ -197,6 +269,45 @@ class SignLanguageViewModel @Inject constructor(
                         val now = System.currentTimeMillis()
                         _detectedResults.value = _detectedResults.value + ResultWithTimestamp(result, now)
                         
+                        android.util.Log.d("TTS", "SignLanguageViewModel: Received result from MediaPipe: '$result'")
+                        
+                        // Check if we should process TTS based on mode
+                        val isSingleRequestMode = _isSingleRequestTTSMode.value
+                        val ttsInProgress = _isTTSInProgress.value
+                        
+                        if (isSingleRequestMode && ttsInProgress) {
+                            android.util.Log.d("TTS", "SignLanguageViewModel: TTS in progress, skipping new request (single-request mode)")
+                        } else {
+                            // Convert text to speech and play audio
+                            viewModelScope.launch {
+                                try {
+                                    _isTTSInProgress.value = true
+                                    android.util.Log.d("TTS", "SignLanguageViewModel: Starting TTS conversion for: '$result' (mode: ${if (isSingleRequestMode) "single-request" else "concurrent"})")
+                                    
+                                    val audioPath = elevenLabsTTS.textToSpeech(result)
+                                    
+                                    if (audioPath != null) {
+                                        android.util.Log.d("TTS", "SignLanguageViewModel: TTS conversion successful, playing audio: $audioPath")
+                                        audioPlayer.playFile(audioPath)
+                                        
+                                        // Wait for audio to finish playing in single-request mode
+                                        if (isSingleRequestMode) {
+                                            android.util.Log.d("TTS", "SignLanguageViewModel: Waiting for audio playback to finish...")
+                                            audioPlayer.waitForPlaybackToFinish()
+                                            android.util.Log.d("TTS", "SignLanguageViewModel: Audio playback finished")
+                                        }
+                                    } else {
+                                        android.util.Log.w("TTS", "SignLanguageViewModel: Failed to generate TTS audio for: '$result'")
+                                    }
+                                } catch (e: Exception) {
+                                    android.util.Log.e("TTS", "SignLanguageViewModel: Error generating or playing TTS for: '$result'", e)
+                                } finally {
+                                    _isTTSInProgress.value = false
+                                    android.util.Log.d("TTS", "SignLanguageViewModel: TTS request completed")
+                                }
+                            }
+                        }
+                        
                         // Update hand detection status
                         val mediaPipe = currentRecognizer as MediaPipeGestureRecognizer
                         _handDetected.value = mediaPipe.hasHand(bitmap)
@@ -240,6 +351,8 @@ class SignLanguageViewModel @Inject constructor(
     override fun onCleared() {
         super.onCleared()
         currentRecognizer.release()
+        audioPlayer.stop()
+        audioPlayer.release()
     }
 }
 
@@ -255,6 +368,8 @@ fun SignLanguageScreen(
     val geminiStatus by viewModel.geminiStatus.collectAsState()
     val pendingRequestCount by viewModel.pendingRequestCount.collectAsState()
     val isHybridMode by viewModel.isHybridMode.collectAsState()
+    val isSingleRequestTTSMode by viewModel.isSingleRequestTTSMode.collectAsState()
+    val isTTSInProgress by viewModel.isTTSInProgress.collectAsState()
     
     var isUsingBackCamera by remember { mutableStateOf(false) }
     var switchCameraTrigger by remember { mutableStateOf(0) }
@@ -386,6 +501,32 @@ fun SignLanguageScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.padding(vertical = 8.dp)
             ) {
+                // TTS mode toggle
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                ) {
+                    Text(
+                        text = "TTS: ${if (isSingleRequestTTSMode) "Single Request" else "Concurrent"}${if (isTTSInProgress && isSingleRequestTTSMode) " (Processing...)" else ""}",
+                        color = if (isTTSInProgress && isSingleRequestTTSMode) Color.Yellow else Color.White,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier
+                            .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                    
+                    Button(
+                        onClick = {
+                            viewModel.toggleTTSMode()
+                        },
+                        modifier = Modifier.padding(0.dp),
+                        enabled = !isTTSInProgress || !isSingleRequestTTSMode
+                    ) {
+                        Text(if (isSingleRequestTTSMode) "Concurrent" else "Single")
+                    }
+                }
+                
                 // Recognizer mode indicator and toggle button
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -602,69 +743,66 @@ fun CameraView(
             }
             
             imageAnalysis.setAnalyzer(executor) { imageProxy ->
-                // Process every 2nd frame for MediaPipe hand detection (~15 FPS)
-                // This gives MediaPipe enough frames to quickly detect hands while keeping CPU usage reasonable
-                // The HybridGestureRecognizer will handle rate limiting Gemini to 2 FPS
-                if (localFrameCounter++ % 2 == 0) {
-                    try {
-                        // Use built-in toBitmap() method from CameraX
-                        val bitmap = imageProxy.toBitmap()
-                        
-                        // Check if frame is empty (only if using front camera and haven't switched yet)
-                        if (!currentIsUsingBackCamera && !hasSwitchedCamera && localFrameCounter > 10) {
-                            // Start checking after a few frames to allow camera to initialize
-                            if (isFrameEmpty(bitmap)) {
-                                emptyFrameCount++
-                                android.util.Log.d("CameraView", "Empty frame detected (count: $emptyFrameCount)")
-                                
-                                // If we get 15 consecutive empty frames (about 1 second at 30fps), switch to back camera
-                                if (emptyFrameCount >= 15) {
-                                    android.util.Log.w("CameraView", "Front camera showing no images, switching to back camera")
-                                    // Switch camera on main thread (CameraX requires main thread)
-                                    mainHandler.post {
-                                        try {
-                                            val backCameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-                                            currentCameraSelector = backCameraSelector
-                                            if (bindCamera(backCameraSelector)) {
-                                                currentIsUsingBackCamera = true
-                                                hasSwitchedCamera = true
-                                                emptyFrameCount = 0
-                                                isUsingBackCamera = true
-                                                android.util.Log.d("CameraView", "Successfully switched to back camera")
-                                            }
-                                        } catch (e: Exception) {
-                                            android.util.Log.e("CameraView", "Failed to switch to back camera", e)
+                // Process every frame for 30 FPS
+                localFrameCounter++
+                try {
+                    // Use built-in toBitmap() method from CameraX
+                    val bitmap = imageProxy.toBitmap()
+                    
+                    // Check if frame is empty (only if using front camera and haven't switched yet)
+                    if (!currentIsUsingBackCamera && !hasSwitchedCamera && localFrameCounter > 10) {
+                        // Start checking after a few frames to allow camera to initialize
+                        if (isFrameEmpty(bitmap)) {
+                            emptyFrameCount++
+                            android.util.Log.d("CameraView", "Empty frame detected (count: $emptyFrameCount)")
+                            
+                            // If we get 15 consecutive empty frames (about 0.5 seconds at 30fps), switch to back camera
+                            if (emptyFrameCount >= 15) {
+                                android.util.Log.w("CameraView", "Front camera showing no images, switching to back camera")
+                                // Switch camera on main thread (CameraX requires main thread)
+                                mainHandler.post {
+                                    try {
+                                        val backCameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                                        currentCameraSelector = backCameraSelector
+                                        if (bindCamera(backCameraSelector)) {
+                                            currentIsUsingBackCamera = true
+                                            hasSwitchedCamera = true
+                                            emptyFrameCount = 0
+                                            isUsingBackCamera = true
+                                            android.util.Log.d("CameraView", "Successfully switched to back camera")
                                         }
+                                    } catch (e: Exception) {
+                                        android.util.Log.e("CameraView", "Failed to switch to back camera", e)
                                     }
                                 }
-                            } else {
-                                // Reset counter if we get a valid frame
-                                emptyFrameCount = 0
                             }
+                        } else {
+                            // Reset counter if we get a valid frame
+                            emptyFrameCount = 0
                         }
-                        
-                        // Apply transformation based on camera type
-                        val matrix = Matrix()
-                        if (!currentIsUsingBackCamera) {
-                            // Front camera: mirror horizontally
-                            matrix.postScale(-1f, 1f)
-                        }
-                        // Rotate 90 degrees (most devices need this)
-                        matrix.postRotate(90f)
-                        
-                        val transformedBitmap = android.graphics.Bitmap.createBitmap(
-                            bitmap,
-                            0,
-                            0,
-                            bitmap.width,
-                            bitmap.height,
-                            matrix,
-                            true
-                        )
-                        onFrameCaptured(transformedBitmap)
-                    } catch (e: Exception) {
-                        android.util.Log.e("CameraView", "Error processing frame", e)
                     }
+                    
+                    // Apply transformation based on camera type
+                    val matrix = Matrix()
+                    if (!currentIsUsingBackCamera) {
+                        // Front camera: mirror horizontally
+                        matrix.postScale(-1f, 1f)
+                    }
+                    // Rotate 90 degrees (most devices need this)
+                    matrix.postRotate(90f)
+                    
+                    val transformedBitmap = android.graphics.Bitmap.createBitmap(
+                        bitmap,
+                        0,
+                        0,
+                        bitmap.width,
+                        bitmap.height,
+                        matrix,
+                        true
+                    )
+                    onFrameCaptured(transformedBitmap)
+                } catch (e: Exception) {
+                    android.util.Log.e("CameraView", "Error processing frame", e)
                 }
                 imageProxy.close()
             }

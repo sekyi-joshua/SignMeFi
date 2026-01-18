@@ -32,8 +32,8 @@ class GeminiGestureRecognizer(
         }
     }
     
-    // Minimal prompt for faster processing
-    private val signLanguagePrompt = "What sign language letter/word is shown? Respond with ONLY the letter/word, or 'UNKNOWN'."
+    // Prompt to detect both letters and words
+    private val signLanguagePrompt = "What sign language letter or word is shown in this image? Respond with ONLY the letter or word detected, or 'UNKNOWN' if nothing is clear. For words, respond with the complete word."
     
     private val requestMutex = Mutex() // Ensures only one request at a time
     

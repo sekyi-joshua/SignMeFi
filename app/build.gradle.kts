@@ -72,6 +72,55 @@ android {
             buildConfigField("String", "GEMINI_API_KEY", "\"\"")
             println("Warning: GEMINI_API_KEY is empty. Please add it to local.properties")
         }
+        
+        // Load Eleven Labs API key and voice ID from gradle.properties
+        val elevenLabsApiKey = project.findProperty("ELEVENLABS_API_KEY") as String? ?: ""
+        val elevenLabsVoiceId = project.findProperty("ELEVENLABS_VOICE_ID") as String? ?: ""
+        
+        // Ensure API key is not too large (Android BuildConfig has limits)
+        val trimmedElevenLabsApiKey = if (elevenLabsApiKey.length > maxKeyLength) {
+            println("Warning: ELEVENLABS_API_KEY truncated from ${elevenLabsApiKey.length} to $maxKeyLength chars")
+            elevenLabsApiKey.substring(0, maxKeyLength)
+        } else {
+            elevenLabsApiKey
+        }
+        
+        // Escape the Eleven Labs API key for BuildConfig
+        val escapedElevenLabsApiKey = if (trimmedElevenLabsApiKey.isNotEmpty()) {
+            trimmedElevenLabsApiKey.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\$", "\\\$")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+        } else {
+            ""
+        }
+        
+        // Escape the Eleven Labs Voice ID for BuildConfig
+        val escapedElevenLabsVoiceId = if (elevenLabsVoiceId.isNotEmpty()) {
+            elevenLabsVoiceId.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\$", "\\\$")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+        } else {
+            ""
+        }
+        
+        // Expose Eleven Labs credentials via BuildConfig
+        if (escapedElevenLabsApiKey.isNotEmpty()) {
+            buildConfigField("String", "ELEVENLABS_API_KEY", "\"$escapedElevenLabsApiKey\"")
+        } else {
+            buildConfigField("String", "ELEVENLABS_API_KEY", "\"\"")
+            println("Warning: ELEVENLABS_API_KEY is empty. Please add it to gradle.properties")
+        }
+        
+        if (escapedElevenLabsVoiceId.isNotEmpty()) {
+            buildConfigField("String", "ELEVENLABS_VOICE_ID", "\"$escapedElevenLabsVoiceId\"")
+        } else {
+            buildConfigField("String", "ELEVENLABS_VOICE_ID", "\"\"")
+            println("Warning: ELEVENLABS_VOICE_ID is empty. Please add it to gradle.properties")
+        }
     }
 
     buildTypes {
@@ -114,6 +163,10 @@ dependencies {
     
     // MediaPipe for gesture recognition
     implementation("com.google.mediapipe:tasks-vision:0.10.14")
+
+    // ExoPlayer for audio playback
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.common)
 
     // CameraX
     implementation(libs.androidx.camera.core)

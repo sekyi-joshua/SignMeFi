@@ -14,4 +14,9 @@
         <domain includeSubdomains="true">ai.google.dev</domain>
         <domain includeSubdomains="true">googleapis.com</domain>
     </domain-config>
+    
+    <!-- Allow Eleven Labs TTS API -->
+    <domain-config cleartextTraffic="false">
+        <domain includeSubdomains="true">api.elevenlabs.io</domain>
+    </domain-config>
 </network-security-config>
